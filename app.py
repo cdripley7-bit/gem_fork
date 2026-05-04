@@ -1,7 +1,7 @@
 import json
 import os
 import uuid
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 from flask_sqlalchemy import SQLAlchemy
 from google import genai
 from google.genai import types
@@ -69,17 +69,127 @@ def get_active_thread(node_id):
         #if dead end, stop tracing
         if not msg:
             break
+            
+        # Find all messages that share this exact same parent_id (the siblings/branches)
+        if msg.parent_id is None:
+            siblings = Message.query.filter_by(parent_id=None).order_by(Message.id).all()
+        else:
+            siblings = Message.query.filter_by(parent_id=msg.parent_id).order_by(Message.id).all()
+            
+        sibling_ids = [s.id for s in siblings]
+        current_index = sibling_ids.index(msg.id)
 
         # insert the message at the beginning of the array to perserve 
         # chronological order
-        thread.insert(0, {"role":msg.role, "text":msg.text})
+        # We now return the ID, parent_id, and the branch math!
+        thread.insert(0, {
+            "id": msg.id,
+            "role": msg.role, 
+            "text": msg.text,
+            "parent_id": msg.parent_id,
+            "siblings": sibling_ids,
+            "branch_index": current_index + 1, 
+            "total_branches": len(sibling_ids)
+        })
         
         # move up to next chat
         current_id = msg.parent_id 
 
     return thread
 
-# API ENDPOINTS
+# recursive deletion logic
+def delete_node_and_children(node_id):
+    """Recursively finds and deletes a message and all of its downstream replies."""
+    children = Message.query.filter_by(parent_id=node_id).all()
+    for child in children:
+        delete_node_and_children(child.id)
+        
+    msg = db.session.get(Message, node_id)
+    if msg:
+        db.session.delete(msg)
+
+#ROUTES
+
+# route to wipe the entire DB
+@app.route('/clear', methods=['DELETE'])
+def clear_chat():
+    """Wipes the entire database for a fresh session."""
+    db.session.query(Message).delete()
+    db.session.commit()
+    return jsonify({"success": True})
+
+# route to delete a specific branch
+@app.route('/delete_branch/<node_id>', methods=['DELETE'])
+def delete_branch(node_id):
+    """Deletes a branch and smartly falls back to a sibling timeline."""
+    msg = db.session.get(Message, node_id)
+    if not msg:
+        return jsonify({"error": "Message not found"}), 404
+        
+    parent_id = msg.parent_id
+    
+    # 1. before we delete, find a sibling branch to jump to
+    if parent_id is None:
+        siblings = Message.query.filter(Message.parent_id == None, Message.id != node_id).all()
+    else:
+        siblings = Message.query.filter(Message.parent_id == parent_id, Message.id != node_id).all()
+        
+    # If there are siblings, our fallback is the first one. Otherwise, fallback to the parent.
+    fallback_node_id = siblings[0].id if siblings else parent_id
+    
+    # 2. Recursively delete the requested node and everything below it
+    delete_node_and_children(node_id)
+    db.session.commit()
+    
+    # 3. Walk down the tree from our fallback node so the screen doesn't go blank
+    if fallback_node_id:
+        current_id = fallback_node_id
+        while True:
+            child = Message.query.filter_by(parent_id=current_id).first()
+            if not child:
+                break
+            current_id = child.id
+            
+        return jsonify({
+            "thread": get_active_thread(current_id),
+            "active_node_id": current_id
+        })
+    else:
+        # If we deleted the very first message of the chat, return a blank slate
+        return jsonify({"thread": [], "active_node_id": None})
+
+
+@app.route('/')
+def home():
+    # This tells Flask to serve an HTML file when you visit the base URL
+    return render_template('index.html')
+
+
+# route to handle clicking the left/right branch arrows
+@app.route('/load_branch/<node_id>', methods=['GET'])
+def load_branch(node_id):
+    """When a user clicks an arrow, we load that specific timeline."""
+    current_node_id = node_id
+    
+    # Walk down the tree to find the very bottom of this specific timeline
+    while True:
+        # Find a child message that replies to our current node
+        # (If a branch has multiple sub-branches, .first() will just follow the first path)
+        child = Message.query.filter_by(parent_id=current_node_id).first()
+        
+        # If there are no more replies, we've hit the end of the chat timeline!
+        if not child:
+            break
+            
+        # Move down to the child and loop again
+        current_node_id = child.id
+            
+    # Now we build the thread starting from the absolute bottom of the chat
+    return jsonify({
+        "thread": get_active_thread(current_node_id),
+        "active_node_id": current_node_id
+    })
+
 
 @app.route('/chat', methods=['Post'])
 def chat():
@@ -137,11 +247,10 @@ def chat():
     db.session.commit()
 
     # return the new state to the client
-    #return both IDs so the frontend knows what to point to next
+    # NEW: Return the completely mapped thread array instead of just the IDs
     return jsonify({
-        "user_message_id": user_msg.id,
-        "model_message_id": model_msg.id,
-        "response": model_text
+        "thread": get_active_thread(model_msg.id),
+        "active_node_id": model_msg.id
     })
 
 # RUN THE APP
@@ -149,7 +258,6 @@ def chat():
 if __name__ == '__main__':
     #debug = True automatically restarts the server when you save changes
     app.run(debug=True)
-
 
 
 

@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini Forking Chat</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom scrollbar to match dark mode */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #555; }
+    </style>
+</head>
+<body class="bg-[#131314] text-gray-200 h-screen flex flex-col items-center">
+
+    <div class="w-full max-w-4xl h-full flex flex-col relative">
+        
+        <div class="p-4 flex justify-between items-center text-gray-300 font-medium tracking-wide">
+            <span class="text-xl font-semibold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400">Gemini Branch</span>
+            <div class="flex items-center gap-4">
+                <span id="status" class="text-xs font-normal opacity-50 bg-[#1e1f20] px-3 py-1 rounded-full border border-gray-700">Ready</span>
+                <button onclick="clearSession()" class="text-xs bg-red-900/20 text-red-400 hover:bg-red-900/50 hover:text-red-300 px-4 py-1.5 rounded-full border border-red-900/50 transition font-semibold">New Chat</button>
+            </div>
+        </div>
+
+        <div id="chat-window" class="flex-1 overflow-y-auto px-4 md:px-10 pb-32 flex flex-col gap-6">
+            <div class="text-center text-gray-500 mt-20 text-2xl font-semibold">How can I help you today?</div>
+        </div>
+
+        <div class="absolute bottom-0 w-full p-6 bg-gradient-to-t from-[#131314] via-[#131314] to-transparent">
+            <div class="max-w-3xl mx-auto flex gap-3 bg-[#1e1f20] p-2 rounded-full border border-gray-700 focus-within:bg-[#282a2c] focus-within:border-gray-600 transition-all shadow-lg">
+                <input type="text" id="prompt-input" 
+                       class="flex-1 bg-transparent px-4 py-3 text-gray-200 focus:outline-none placeholder-gray-500" 
+                       placeholder="Ask Gemini...">
+                <button id="send-btn" class="bg-gray-300 hover:bg-white text-black px-5 py-2 rounded-full font-semibold transition">
+                    Send
+                </button>
+            </div>
+            <div class="text-center text-[#9aa0a6] text-xs mt-3">
+                Gemini may display inaccurate info, including about people, so double-check its responses.
+            </div>
+        </div>
+        
+    </div>
+
+    <script>
+        // THE STATE
+        let activeParentId = null;
+        let currentThread = [];
+
+        const chatWindow = document.getElementById('chat-window');
+        const inputField = document.getElementById('prompt-input');
+        const sendBtn = document.getElementById('send-btn');
+        const statusText = document.getElementById('status');
+
+        function renderChat() {
+            chatWindow.innerHTML = '';
+            
+            if (currentThread.length === 0) {
+                chatWindow.innerHTML = '<div class="text-center text-gray-500 mt-20 text-2xl font-semibold">How can I help you today?</div>';
+                return;
+            }
+
+            currentThread.forEach((msg, index) => {
+                const wrapper = document.createElement('div');
+                const isUser = msg.role === 'user';
+                
+                // Wrapper alignment
+                wrapper.className = `flex flex-col w-full relative group ${
+                    isUser ? 'items-end' : 'items-start'
+                }`;
+
+                // The Message Bubble
+                const bubble = document.createElement('div');
+                
+                // Gemini styling: User gets a dark pill, Model gets plain text
+                if (isUser) {
+                    bubble.className = 'px-6 py-3 rounded-3xl bg-[#282a2c] text-[#e3e3e3] max-w-[80%] leading-relaxed shadow-sm';
+                } else {
+                    bubble.className = 'py-2 text-[#e3e3e3] w-full max-w-3xl leading-relaxed';
+                }
+                
+                bubble.innerText = msg.text;
+
+                // The Edit Button (Only for User)
+                if (isUser) {
+                    const editBtn = document.createElement('button');
+                    editBtn.innerHTML = `
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                        </svg>
+                    `;
+                    editBtn.className = 'absolute -left-8 top-3 text-gray-500 opacity-0 group-hover:opacity-100 transition hover:text-gray-300 p-1 bg-[#1e1f20] rounded-full border border-gray-700';
+                    editBtn.title = "Edit & Branch";
+                    editBtn.onclick = () => handleFork(index);
+                    bubble.appendChild(editBtn);
+                }
+                wrapper.appendChild(bubble);
+
+                // THE BRANCH ARROWS & TRASH CAN (Only show if total_branches > 1)
+                if (msg.total_branches > 1) {
+                    const nav = document.createElement('div');
+                    nav.className = `flex items-center gap-3 mt-2 text-xs font-semibold px-2 ${isUser ? 'text-gray-500' : 'text-gray-600'}`;
+                    
+                    const prevIndex = msg.branch_index - 2; 
+                    const nextIndex = msg.branch_index;
+                    
+                    const prevId = prevIndex >= 0 ? msg.siblings[prevIndex] : null;
+                    const nextId = nextIndex < msg.total_branches ? msg.siblings[nextIndex] : null;
+
+                    nav.innerHTML = `
+                        <button onclick="switchBranch('${prevId}')" class="p-1 rounded hover:bg-[#282a2c] transition ${prevId ? 'text-gray-400 hover:text-white cursor-pointer' : 'opacity-30 cursor-not-allowed'}">&lt;</button>
+                        <span>${msg.branch_index} / ${msg.total_branches}</span>
+                        <button onclick="switchBranch('${nextId}')" class="p-1 rounded hover:bg-[#282a2c] transition ${nextId ? 'text-gray-400 hover:text-white cursor-pointer' : 'opacity-30 cursor-not-allowed'}">&gt;</button>
+                        
+                        <button onclick="deleteBranch('${msg.id}')" title="Delete this timeline" class="ml-2 p-1 text-gray-600 hover:text-red-400 transition">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                        </button>
+                    `;
+                    wrapper.appendChild(nav);
+                }
+
+                chatWindow.appendChild(wrapper);
+            });
+            
+            chatWindow.scrollTop = chatWindow.scrollHeight;
+        }
+
+        async function switchBranch(nodeId) {
+            if (!nodeId || nodeId === 'null') return;
+            statusText.innerText = "Switching...";
+            
+            try {
+                const response = await fetch(`/load_branch/${nodeId}`);
+                const data = await response.json();
+                
+                currentThread = data.thread;
+                activeParentId = data.active_node_id;
+                renderChat();
+                statusText.innerText = "Ready";
+            } catch (error) {
+                statusText.innerText = "Error";
+            }
+        }
+
+        function handleFork(index) {
+            const msgToEdit = currentThread[index];
+            const newText = prompt("Edit your prompt to fork the chat:", msgToEdit.text);
+            
+            if (newText && newText !== msgToEdit.text) {
+                activeParentId = msgToEdit.parent_id; 
+                processMessage(newText);
+            }
+        }
+
+        // --- NEW DELETION API CALLS ---
+        async function clearSession() {
+            if (!confirm("Are you sure you want to clear the entire chat history?")) return;
+            
+            statusText.innerText = "Clearing...";
+            try {
+                await fetch('/clear', { method: 'DELETE' });
+                currentThread = [];
+                activeParentId = null;
+                renderChat();
+                statusText.innerText = "Ready";
+            } catch (error) {
+                statusText.innerText = "Error clearing session";
+            }
+        }
+
+        async function deleteBranch(nodeId) {
+            if (!confirm("Are you sure you want to delete this branch and all messages below it?")) return;
+            
+            statusText.innerText = "Deleting...";
+            try {
+                const response = await fetch(`/delete_branch/${nodeId}`, { method: 'DELETE' });
+                const data = await response.json();
+                
+                // Python automatically returns the parent's timeline so the screen doesn't go blank!
+                currentThread = data.thread || [];
+                activeParentId = data.active_node_id || null;
+                renderChat();
+                statusText.innerText = "Ready";
+            } catch (error) {
+                statusText.innerText = "Error deleting";
+            }
+        }
+
+        // --- MESSAGE PROCESSING ---
+        async function processMessage(textOverride = null) {
+            const text = textOverride || inputField.value.trim();
+            if (!text) return;
+
+            inputField.value = '';
+            statusText.innerText = "Thinking...";
+
+            // Temporary UI update
+            currentThread.push({ id: 'temp', role: 'user', text: text, parentId: activeParentId, total_branches: 1 });
+            renderChat();
+
+            try {
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text, parent_id: activeParentId })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    currentThread = data.thread;
+                    activeParentId = data.active_node_id;
+                    statusText.innerText = "Ready";
+                    renderChat();
+                } else {
+                    alert(`API Error: ${data.error}`);
+                    currentThread.pop(); // Remove temp msg
+                    renderChat();
+                    statusText.innerText = "Error";
+                }
+            } catch (error) {
+                alert("Failed to connect to server.");
+                currentThread.pop(); // Remove temp msg
+                renderChat();
+                statusText.innerText = "Error";
+            }
+        }
+
+        // Event Listeners
+        sendBtn.addEventListener('click', () => processMessage());
+        inputField.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') processMessage();
+        });
+    </script>
+</body>
+</html>
