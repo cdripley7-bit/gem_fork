@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 from flask import Flask, request, jsonify
@@ -34,19 +35,19 @@ class Message (db.Model):
     Structure allows for forking  by linking each message to its parent,
     Creating a tree.
     """
-    #generate a random string UUID for each messageID 
-    id = db.Column(db.string(36), primaryKey =True, default = lambda: str(uuid.uuid4()))
+    # generate a random string UUID for each messageID
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
 
-    #the actual text of response
-    text = db.Column(db.text, nullable=False)
+    # the actual text of response
+    text = db.Column(db.Text, nullable=False)
 
     #sender(role || model)
-    role = db.Column(db.string(10), nullable=False)
+    role = db.Column(db.String(10), nullable=False)
 
-    #points to the message that came directly before it
-    parent_id = db.Column(db.string(36), db.ForeignKey('message.id'), nullable =True)
+    # points to the message that came directly before it
+    parent_id = db.Column(db.String(36), db.ForeignKey('message.id'), nullable=True)
 
-#creates database tables if they don't exist yet
+# creates database tables if they don't exist yet
 with app.app_context():
     db.create_all()
 
@@ -88,6 +89,8 @@ def chat():
     """
     # parse incoming data from json frontend
     data = request.json
+    if isinstance(data, str):
+        data = json.loads(data)
     user_text = data.get('text')
 
     # gets parent_id (null if no parent_id)
@@ -107,8 +110,8 @@ def chat():
     # format the history into gemini SDK compatible structure
     formatted_contents = []
     for msg in history_dicts:
-        formatted_contents.append (
-            types.Content(role=msg['role'], parts=[types.Part.from_text(text=msg['text]'])])
+        formatted_contents.append(
+            types.Content(role=msg['role'], parts=[types.Part.from_text(text=msg['text'])])
         )
 
     # append the message just created to this list
@@ -120,7 +123,7 @@ def chat():
     try:
         #using flash model
         response=client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.1-flash-lite-preview',
             contents=formatted_contents
         )
         model_text=response.text
@@ -130,8 +133,8 @@ def chat():
     
     # put model into Message class structure then save to database
     model_msg = Message(text=model_text, role='model', parent_id=user_msg.id)
-    db.add(model_msg)
-    db.commit()
+    db.session.add(model_msg)
+    db.session.commit()
 
     # return the new state to the client
     #return both IDs so the frontend knows what to point to next
